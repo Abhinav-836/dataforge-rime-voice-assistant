@@ -1,9 +1,9 @@
-# render.yaml - Render Blueprint Configuration (NO DISK - FREE TIER)
+# render.yaml - Single Web Service (Free Tier Compatible)
 
 services:
-  # HTTP Server - Serves Web UI and REST API
+  # Single Web Service - Runs HTTP Server + Voice Agent
   - type: web
-    name: dataforge-rime-server
+    name: dataforge-rime-voice-assistant
     runtime: python
     repo: https://github.com/Abhinav-836/dataforge-rime-voice-assistant
     plan: free
@@ -34,38 +34,6 @@ services:
       pip install -r requirements.txt
       python -c "from agent.db.database import init_db; init_db()"
     startCommand: |
-      python frontend/serve.py
-    healthCheckPath: /health
-
-  # Background Worker - LiveKit Voice Agent
-  - type: worker
-    name: dataforge-rime-agent
-    runtime: python
-    repo: https://github.com/Abhinav-836/dataforge-rime-voice-assistant
-    plan: free
-    envVars:
-      - key: DATABASE_PATH
-        value: /tmp/agent.db
-      - key: RIME_API_KEY
-        sync: false
-      - key: LIVEKIT_URL
-        sync: false
-      - key: LIVEKIT_API_KEY
-        sync: false
-      - key: LIVEKIT_API_SECRET
-        sync: false
-      - key: DEEPGRAM_API_KEY
-        sync: false
-      - key: GROQ_API_KEY
-        sync: false
-      - key: OPENAI_API_KEY
-        sync: false
-      - key: FINNHUB_API_KEY
-        sync: false
-      - key: LOG_LEVEL
-        value: INFO
-    buildCommand: |
-      pip install -r requirements.txt
-      python -c "from agent.db.database import init_db; init_db()"
-    startCommand: |
+      python frontend/serve.py &
       python -m agent.main start
+    healthCheckPath: /health
