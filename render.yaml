@@ -1,4 +1,5 @@
 # render.yaml - Single Web Service (Free Tier Compatible)
+# FIXED: Proper process management with port binding
 
 services:
   # Single Web Service - Runs HTTP Server + Voice Agent
@@ -30,10 +31,73 @@ services:
         sync: false
       - key: LOG_LEVEL
         value: INFO
+      # Disable the agent's internal HTTP server to avoid port conflicts
+      - key: LIVEKIT_AGENT_PORT
+        value: "0"
     buildCommand: |
       pip install -r requirements.txt
       python -c "from agent.db.database import init_db; init_db()"
     startCommand: |
-      python frontend/serve.py &
-      python -m agent.main dev
+      python - <<'PY'
+      import os
+      import signal
+      import subprocess
+      import sys
+      import threading
+      import time
+
+      def signal_handler(sig, frame):
+          print('Received shutdown signal, terminating processes...')
+          sys.exit(0)
+
+      signal.signal(signal.SIGINT, signal_handler)
+      signal.signal(signal.SIGTERM, signal_handler)
+
+      port = os.environ.get('PORT', '5500')
+      print(f'Starting services on Render with PORT={port}')
+
+      server = subprocess.Popen(
+          [sys.executable, 'frontend/serve.py'],
+          stdout=subprocess.PIPE,
+          stderr=subprocess.STDOUT,
+          text=True,
+          bufsize=1,
+      )
+      print(f'HTTP server started with PID: {server.pid}')
+
+      agent = subprocess.Popen(
+          [sys.executable, '-m', 'agent.main', 'dev'],
+          stdout=subprocess.PIPE,
+          stderr=subprocess.STDOUT,
+          text=True,
+          bufsize=1,
+      )
+      print(f'LiveKit agent started with PID: {agent.pid}')
+      print('Both services are running. Monitoring...')
+
+      def print_output(process, name):
+          for line in process.stdout:
+              print(f'[{name}] {line.strip()}')
+
+      threading.Thread(target=print_output, args=(server, 'SERVER'), daemon=True).start()
+      threading.Thread(target=print_output, args=(agent, 'AGENT'), daemon=True).start()
+
+      try:
+          while True:
+              time.sleep(1)
+              if server.poll() is not None:
+                  print(f'SERVER process exited with code {server.returncode}')
+                  agent.terminate()
+                  break
+              if agent.poll() is not None:
+                  print(f'AGENT process exited with code {agent.returncode}')
+      except KeyboardInterrupt:
+          print('Interrupted, shutting down...')
+      finally:
+          server.terminate()
+          agent.terminate()
+          server.wait()
+          agent.wait()
+          print('All processes terminated.')
+      PY
     healthCheckPath: /health
