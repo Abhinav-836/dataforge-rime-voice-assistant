@@ -15,6 +15,18 @@ from dotenv import load_dotenv
 os.environ["LIVEKIT_AGENT_HTTP_PORT"] = ""
 os.environ["LIVEKIT_AGENT_PORT"] = "0"
 
+try:
+    from livekit.agents import AgentServer
+    original_init = AgentServer.__init__
+    def patched_init(self, *args, **kwargs):
+        kwargs.pop('http_port', None)
+        kwargs.pop('port', None)
+        return original_init(self, *args, **kwargs)
+    AgentServer.__init__ = patched_init
+except Exception as e:
+    print(f"Warning: Could not patch AgentServer: {e}")
+
+    
 from livekit.agents import (
     Agent,
     AgentServer,
