@@ -12,6 +12,9 @@ import time
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
 
+os.environ["LIVEKIT_AGENT_HTTP_PORT"] = ""
+os.environ["LIVEKIT_AGENT_PORT"] = "0"
+
 from livekit.agents import (
     Agent,
     AgentServer,
