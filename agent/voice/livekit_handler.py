@@ -43,7 +43,7 @@ from agent.utils.logger import get_logger
 load_dotenv()
 logger = get_logger(__name__)
 
-server = AgentServer()
+server = AgentServer(http_port=None)
 
 
 def _build_llm():
