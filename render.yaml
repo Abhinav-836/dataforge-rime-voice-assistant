@@ -35,5 +35,5 @@ services:
       python -c "from agent.db.database import init_db; init_db()"
     startCommand: |
       python frontend/serve.py &
-      python -m agent.main start
+      python -m agent.main dev
     healthCheckPath: /health
