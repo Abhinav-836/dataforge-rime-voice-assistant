@@ -1,18 +1,20 @@
 #!/bin/bash
-# start.sh - Use LiveKit CLI with disabled HTTP server
+# start.sh - Run HTTP server and agent
 
 echo "Starting services on Render with PORT=${PORT:-5500}"
-
-# Install livekit-cli if not available
-pip install livekit-cli -q
 
 # Start the HTTP server
 echo "Starting HTTP server on port ${PORT:-5500}..."
 python frontend/serve.py &
 
-# Start the agent using LiveKit CLI with HTTP server disabled
-echo "Starting LiveKit agent with HTTP server disabled..."
-lk agent dev --watch-path agent --http-port 0 &
+# Wait a moment for server to start
+sleep 2
+
+# Start the agent with HTTP server disabled via environment
+echo "Starting LiveKit agent..."
+export LIVEKIT_AGENT_HTTP_PORT="0"
+export LIVEKIT_AGENT_PORT="0"
+python -m agent.main dev &
 
 # Keep the container alive
 wait
