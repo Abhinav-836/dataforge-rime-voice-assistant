@@ -7,12 +7,13 @@ echo "Starting services on Render with PORT=${PORT:-5500}"
 export LIVEKIT_AGENT_HTTP_PORT=""
 export LIVEKIT_AGENT_PORT="0"
 
-# Start both services in the background
+# Start the HTTP server
 echo "Starting HTTP server on port ${PORT:-5500}..."
 python frontend/serve.py &
 
+# Start the LiveKit agent with the environment variables set
 echo "Starting LiveKit agent..."
-python -m agent.main dev &
+env LIVEKIT_AGENT_HTTP_PORT="" LIVEKIT_AGENT_PORT="0" python -m agent.main dev &
 
 # Keep the container alive
 wait
