@@ -1,13 +1,5 @@
 """
 Production HTTP server for DataForge Rime Starter frontend & API.
-
-Supports:
-  - Multi-user session management (POST /api/session, GET /api/sessions, GET /api/sessions/<id>)
-  - Session & global settings persistence (GET/PUT /api/settings)
-  - LiveKit token generation with per-room isolation (GET /api/token)
-  - Real-time stock quote proxying (GET /api/quote, GET /api/compare)
-  - Health & readiness probes (GET /health, GET /ready)
-  - Security headers, CORS configuration, in-memory IP rate limiting, and request size guards.
 """
 
 import os
@@ -24,11 +16,15 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 from dotenv import load_dotenv
 
+# Get the directory where this file is located
 FRONTEND_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = FRONTEND_DIR.parent
+
+# Add project root to path
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# Load environment from parent directory
 load_dotenv(PROJECT_ROOT / ".env")
 
 from livekit import api
@@ -45,11 +41,11 @@ LIVEKIT_API_KEY = config.livekit_api_key
 LIVEKIT_API_SECRET = config.livekit_api_secret
 ALLOWED_ORIGINS = config.allowed_origins
 
-# Rate Limiting configuration (60 requests per minute per IP)
+# Rate Limiting configuration
 RATE_LIMIT_WINDOW_SECONDS = 60.0
 RATE_LIMIT_MAX_REQUESTS = config.rate_limit_per_minute
 _ip_request_timestamps: Dict[str, List[float]] = defaultdict(list)
-MAX_BODY_BYTES = 65536  # 64 KB max payload to prevent DoS
+MAX_BODY_BYTES = 65536
 
 
 def _is_rate_limited(client_ip: str) -> bool:
@@ -76,6 +72,11 @@ def _make_livekit_token(identity: str, room_name: str) -> str:
 
 class ProductionServerHandler(http.server.SimpleHTTPRequestHandler):
     """Production HTTP request handler for API endpoints and static assets."""
+
+    def __init__(self, *args, **kwargs):
+        # Set the directory to serve files from
+        self.directory = str(FRONTEND_DIR)
+        super().__init__(*args, **kwargs)
 
     def _get_client_ip(self) -> str:
         forwarded = self.headers.get("X-Forwarded-For")
@@ -156,26 +157,7 @@ class ProductionServerHandler(http.server.SimpleHTTPRequestHandler):
                 "service": "dataforge-voice-agent"
             })
 
-        # Readiness Probe
-        if path == "/ready":
-            db_ready = False
-            try:
-                with get_db_connection() as conn:
-                    conn.execute("SELECT 1").fetchone()
-                    db_ready = True
-            except Exception:
-                db_ready = False
-
-            livekit_configured = bool(LIVEKIT_URL and LIVEKIT_API_KEY and LIVEKIT_API_SECRET)
-            ready = db_ready and livekit_configured
-            status_code = 200 if ready else 503
-            return self._send_json_response(status_code, {
-                "ready": ready,
-                "database_connected": db_ready,
-                "livekit_configured": livekit_configured,
-            })
-
-        # Check Rate Limit on API endpoints
+        # API routes...
         if path.startswith("/api/"):
             if _is_rate_limited(client_ip):
                 self.send_response(429)
@@ -185,7 +167,6 @@ class ProductionServerHandler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(b'{"error": "Rate limit exceeded. Please wait a moment."}')
                 return
 
-        # GET /api/sessions/<id>
         if path.startswith("/api/sessions/"):
             session_id = path[len("/api/sessions/"):].strip("/")
             session = repo.get_session(session_id)
@@ -201,7 +182,6 @@ class ProductionServerHandler(http.server.SimpleHTTPRequestHandler):
                 "settings": settings,
             })
 
-        # GET /api/sessions (List sessions with pagination & search)
         if path == "/api/sessions":
             limit = min(int(query_params.get("limit", ["50"])[0]), 100)
             offset = max(int(query_params.get("offset", ["0"])[0]), 0)
@@ -215,13 +195,11 @@ class ProductionServerHandler(http.server.SimpleHTTPRequestHandler):
                 "offset": offset,
             })
 
-        # GET /api/settings
         if path == "/api/settings":
             session_id = query_params.get("session_id", ["global"])[0]
             settings = repo.get_settings(session_id)
             return self._send_json_response(200, settings)
 
-        # GET /api/token (Legacy single-room token generation)
         if path == "/api/token":
             if not (LIVEKIT_API_KEY and LIVEKIT_API_SECRET and LIVEKIT_URL):
                 return self._send_json_response(500, {
@@ -240,7 +218,6 @@ class ProductionServerHandler(http.server.SimpleHTTPRequestHandler):
             except Exception as e:
                 return self._send_json_response(500, {"error": str(e)})
 
-        # GET /api/quote
         if path == "/api/quote":
             symbol = query_params.get("symbol", ["AAPL"])[0].upper()
             quote = _fetch_quote_sync(symbol)
@@ -248,7 +225,6 @@ class ProductionServerHandler(http.server.SimpleHTTPRequestHandler):
                 return self._send_json_response(404, quote or {"error": f"Quote failed for {symbol}"})
             return self._send_json_response(200, quote)
 
-        # GET /api/compare
         if path == "/api/compare":
             symbols_str = query_params.get("symbols", ["AAPL,TSLA"])[0]
             symbols = [s.strip().upper() for s in symbols_str.split(",") if s.strip()]
@@ -256,7 +232,7 @@ class ProductionServerHandler(http.server.SimpleHTTPRequestHandler):
             valid_quotes = [q for q in quotes if q and "error" not in q]
             return self._send_json_response(200, {"results": valid_quotes})
 
-        # Default: Serve static files from FRONTEND_DIR with security headers
+        # Serve static files
         return super().do_GET()
 
     def do_POST(self):
@@ -267,7 +243,6 @@ class ProductionServerHandler(http.server.SimpleHTTPRequestHandler):
         if _is_rate_limited(client_ip):
             return self._send_json_response(429, {"error": "Rate limit exceeded. Please wait a moment."})
 
-        # POST /api/session (Isolated multi-user session creation)
         if path == "/api/session":
             body, err = self._read_json_body()
             if err:
@@ -302,7 +277,6 @@ class ProductionServerHandler(http.server.SimpleHTTPRequestHandler):
                 logger.error(f"Failed to create session: {e}")
                 return self._send_json_response(500, {"error": f"Failed to create session: {str(e)}"})
 
-        # POST /api/token (Issue token for validated session ID)
         if path == "/api/token":
             body, err = self._read_json_body()
             if err:
@@ -334,7 +308,6 @@ class ProductionServerHandler(http.server.SimpleHTTPRequestHandler):
             except Exception as e:
                 return self._send_json_response(500, {"error": str(e)})
 
-        # POST /api/settings
         if path == "/api/settings":
             body, err = self._read_json_body()
             if err or not isinstance(body, dict):
@@ -353,7 +326,6 @@ class ProductionServerHandler(http.server.SimpleHTTPRequestHandler):
         if _is_rate_limited(client_ip):
             return self._send_json_response(429, {"error": "Rate limit exceeded. Please wait a moment."})
 
-        # PUT /api/settings
         if path == "/api/settings":
             body, err = self._read_json_body()
             if err or not isinstance(body, dict):
@@ -373,8 +345,9 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 5500))
     handler = functools.partial(ProductionServerHandler, directory=str(FRONTEND_DIR))
     http.server.ThreadingHTTPServer.allow_reuse_address = True
-    with http.server.ThreadingHTTPServer(("", port), handler) as httpd:
+    with http.server.ThreadingHTTPServer(("0.0.0.0", port), handler) as httpd:
         print(f"DataForge production server running on http://localhost:{port}")
+        print(f"Serving files from: {FRONTEND_DIR}")
         print("API endpoints available: /api/session, /api/sessions, /api/settings, /health, /ready")
         try:
             httpd.serve_forever()
