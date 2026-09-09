@@ -1,17 +1,17 @@
-# render.yaml - Render Blueprint Configuration
+# render.yaml - Render Blueprint Configuration (NO DISK - FREE TIER)
 
 services:
   # HTTP Server - Serves Web UI and REST API
   - type: web
     name: dataforge-rime-server
     runtime: python
-    repo: https://github.com/your-username/dataforge-rime-starter
+    repo: https://github.com/Abhinav-836/dataforge-rime-voice-assistant
     plan: free
     envVars:
       - key: PORT
         value: 5500
       - key: DATABASE_PATH
-        value: /opt/render/data/agent.db
+        value: /tmp/agent.db
       - key: RIME_API_KEY
         sync: false
       - key: LIVEKIT_URL
@@ -36,20 +36,16 @@ services:
     startCommand: |
       python frontend/serve.py
     healthCheckPath: /health
-    disk:
-      name: data
-      mountPath: /opt/render/data
-      sizeGB: 1
 
   # Background Worker - LiveKit Voice Agent
   - type: worker
     name: dataforge-rime-agent
     runtime: python
-    repo: https://github.com/your-username/dataforge-rime-starter
+    repo: https://github.com/Abhinav-836/dataforge-rime-voice-assistant
     plan: free
     envVars:
       - key: DATABASE_PATH
-        value: /opt/render/data/agent.db
+        value: /tmp/agent.db
       - key: RIME_API_KEY
         sync: false
       - key: LIVEKIT_URL
@@ -73,7 +69,3 @@ services:
       python -c "from agent.db.database import init_db; init_db()"
     startCommand: |
       python -m agent.main start
-    disk:
-      name: data
-      mountPath: /opt/render/data
-      sizeGB: 1
