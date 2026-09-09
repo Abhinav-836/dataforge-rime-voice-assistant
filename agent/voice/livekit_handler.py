@@ -26,10 +26,9 @@ try:
 except Exception as e:
     print(f"Warning: Could not patch AgentServer: {e}")
 
-    
+
 from livekit.agents import (
     Agent,
-    AgentServer,
     AgentSession,
     JobContext,
     JobProcess,
