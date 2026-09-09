@@ -1,0 +1,79 @@
+# render.yaml - Render Blueprint Configuration
+
+services:
+  # HTTP Server - Serves Web UI and REST API
+  - type: web
+    name: dataforge-rime-server
+    runtime: python
+    repo: https://github.com/your-username/dataforge-rime-starter
+    plan: free
+    envVars:
+      - key: PORT
+        value: 5500
+      - key: DATABASE_PATH
+        value: /opt/render/data/agent.db
+      - key: RIME_API_KEY
+        sync: false
+      - key: LIVEKIT_URL
+        sync: false
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
+      - key: DEEPGRAM_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: FINNHUB_API_KEY
+        sync: false
+      - key: LOG_LEVEL
+        value: INFO
+    buildCommand: |
+      pip install -r requirements.txt
+      python -c "from agent.db.database import init_db; init_db()"
+    startCommand: |
+      python frontend/serve.py
+    healthCheckPath: /health
+    disk:
+      name: data
+      mountPath: /opt/render/data
+      sizeGB: 1
+
+  # Background Worker - LiveKit Voice Agent
+  - type: worker
+    name: dataforge-rime-agent
+    runtime: python
+    repo: https://github.com/your-username/dataforge-rime-starter
+    plan: free
+    envVars:
+      - key: DATABASE_PATH
+        value: /opt/render/data/agent.db
+      - key: RIME_API_KEY
+        sync: false
+      - key: LIVEKIT_URL
+        sync: false
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
+      - key: DEEPGRAM_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: FINNHUB_API_KEY
+        sync: false
+      - key: LOG_LEVEL
+        value: INFO
+    buildCommand: |
+      pip install -r requirements.txt
+      python -c "from agent.db.database import init_db; init_db()"
+    startCommand: |
+      python -m agent.main start
+    disk:
+      name: data
+      mountPath: /opt/render/data
+      sizeGB: 1

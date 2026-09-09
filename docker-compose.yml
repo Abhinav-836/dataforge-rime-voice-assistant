@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  # HTTP Server: Serves Web UI, creates isolated LiveKit rooms, and handles REST API
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dataforge-rime-server
+    restart: unless-stopped
+    ports:
+      - "5500:5500"
+    environment:
+      - PORT=5500
+      - DATABASE_PATH=/app/data/agent.db
+    env_file:
+      - .env
+    volumes:
+      - data-volume:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5500/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # Voice Agent Worker: Connects to LiveKit Cloud WebRTC room, Deepgram, LLM, and Rime TTS
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dataforge-rime-agent
+    restart: unless-stopped
+    command: ["python", "-m", "agent.main", "start"]
+    environment:
+      - DATABASE_PATH=/app/data/agent.db
+    env_file:
+      - .env
+    volumes:
+      - data-volume:/app/data
+    depends_on:
+      server:
+        condition: service_healthy
+
+volumes:
+  data-volume:
+    driver: local

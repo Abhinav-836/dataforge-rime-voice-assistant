@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DataForge Voice Assistant</title>
+  
+  <!-- LiveKit Client SDK -->
+  <script src="livekit-client.umd.js?v=2"></script>
+  <script>
+    if (typeof LivekitClient === "undefined") {
+      document.write('<script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"><\/script>');
+    }
+  </script>
+  
+  <!-- ONLY these CSS files with version -->
+  <link rel="stylesheet" href="css/main.css?v=2" />
+</head>
+<body>
+  <div id="app">
+    <!-- Top Bar -->
+    <header class="app-header-minimal">
+      <div class="header-left">
+        <h1>⚡ Voice Assistant</h1>
+        <span class="status-dot" id="status-dot"></span>
+        <span class="status-text" id="status-text">Ready</span>
+      </div>
+      <div class="header-right">
+        <span class="session-duration" id="header-duration-timer">00:00:00</span>
+        <button class="icon-btn" id="btn-sessions" title="Session History">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+          </svg>
+        </button>
+        <button class="icon-btn" id="btn-settings" title="Settings">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06-.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
+        <button class="icon-btn" id="btn-hangup" title="End Session" style="display:none;">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91"/>
+            <line x1="22" y1="2" x2="2" y2="22"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main-content-minimal">
+      <!-- Three Column Layout -->
+      <div class="dashboard-grid">
+        <!-- Left Panel: Session Info -->
+        <div class="info-panel">
+          <div class="panel-card">
+            <div class="panel-title">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"/>
+                <polyline points="12 6 12 12 16 14"/>
+              </svg>
+              <span>Session</span>
+            </div>
+            <div class="info-stats">
+              <div class="stat-item">
+                <span class="stat-label">Version</span>
+                <span class="stat-value" id="stat-version">v0</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">Turns</span>
+                <span class="stat-value" id="stat-turns">0</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">Interruptions</span>
+                <span class="stat-value" id="stat-interruptions" style="color:var(--accent-rose);">0</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel-card">
+            <div class="panel-title">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+              </svg>
+              <span>Tools</span>
+              <span class="badge-pill pill-cyan" id="badge-active-tools">0 running</span>
+            </div>
+            <div class="tool-activity-mini" id="side-tool-activity-list">
+              <div style="font-size:12px;color:var(--text-muted);text-align:center;padding:8px 0;" id="side-tool-empty">No active tools</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Center: Orb + Chat -->
+        <div class="center-panel">
+          <!-- Orb Section -->
+          <div class="orb-container">
+            <div class="orb-wrapper">
+              <div class="orb-glow" id="orb-glow"></div>
+              <div class="voice-orb" id="voice-orb" role="button" tabindex="0">
+                <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.5">
+                  <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                  <line x1="12" y1="19" x2="12" y2="22"/>
+                  <line x1="8" y1="22" x2="16" y2="22"/>
+                </svg>
+              </div>
+              <div class="orb-label" id="orb-label">Tap to start</div>
+              <div class="orb-sub-label" id="orb-sub-label">Press Space to toggle</div>
+              
+              <!-- Waveforms -->
+              <div class="waveform-row">
+                <div class="waveform-container" id="stage-wave-left">
+                  <div class="waveform-bar" style="height: 12px;"></div>
+                  <div class="waveform-bar" style="height: 22px;"></div>
+                  <div class="waveform-bar" style="height: 38px;"></div>
+                  <div class="waveform-bar" style="height: 18px;"></div>
+                  <div class="waveform-bar" style="height: 30px;"></div>
+                  <div class="waveform-bar" style="height: 14px;"></div>
+                  <div class="waveform-bar" style="height: 26px;"></div>
+                  <div class="waveform-bar" style="height: 10px;"></div>
+                </div>
+
+                <div class="waveform-container cyan" id="stage-wave-right">
+                  <div class="waveform-bar" style="height: 16px;"></div>
+                  <div class="waveform-bar" style="height: 32px;"></div>
+                  <div class="waveform-bar" style="height: 14px;"></div>
+                  <div class="waveform-bar" style="height: 40px;"></div>
+                  <div class="waveform-bar" style="height: 24px;"></div>
+                  <div class="waveform-bar" style="height: 36px;"></div>
+                  <div class="waveform-bar" style="height: 18px;"></div>
+                  <div class="waveform-bar" style="height: 22px;"></div>
+                </div>
+              </div>
+
+              <!-- Audio Level -->
+              <div class="audio-level-container">
+                <span class="audio-icon">🔊</span>
+                <div class="audio-level-track">
+                  <div class="audio-level-fill" id="audio-output-level-bar"></div>
+                </div>
+                <span class="audio-db" id="audio-output-db">-∞ dB</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Transcript -->
+          <div class="transcript-container">
+            <div class="transcript-messages" id="transcript-messages">
+              <div class="empty-state">
+                <span class="empty-icon">💬</span>
+                <p>Tap the orb to start speaking</p>
+                <span class="empty-hint">Or type a message below</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Input Bar -->
+          <div class="input-bar">
+            <form class="input-form" id="form-chat-input">
+              <input 
+                type="text" 
+                id="input-chat-text" 
+                placeholder="Type a message or tap the orb..." 
+                autocomplete="off"
+              />
+              <button type="submit" class="send-btn" id="send-btn">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="22" y1="2" x2="11" y2="13"/>
+                  <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                </svg>
+              </button>
+            </form>
+          </div>
+        </div>
+
+        <!-- Right Panel: Quick Info -->
+        <div class="info-panel">
+          <div class="panel-card">
+            <div class="panel-title">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                <circle cx="12" cy="7" r="4"/>
+              </svg>
+              <span>Voice</span>
+            </div>
+            <div class="info-stats">
+              <div class="stat-item">
+                <span class="stat-label">TTS</span>
+                <span class="stat-value" style="font-size:12px;color:var(--accent-purple);">Rime (coda)</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">Speaker</span>
+                <span class="stat-value" style="font-size:12px;">celeste</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">Status</span>
+                <span class="stat-value" id="voice-status-text" style="font-size:12px;color:var(--accent-cyan);">Ready</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel-card">
+            <div class="panel-title">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="12 2 2 7 12 12 22 7 12 2"/>
+                <polyline points="2 17 12 22 22 17"/>
+                <polyline points="2 12 12 17 22 12"/>
+              </svg>
+              <span>System</span>
+            </div>
+            <div class="info-stats">
+              <div class="stat-item">
+                <span class="stat-label">Connection</span>
+                <span class="stat-value" id="connection-status" style="font-size:12px;color:var(--accent-emerald);">● Connected</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">Latency</span>
+                <span class="stat-value" id="stat-latency" style="font-size:12px;">-- ms</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">Fencing</span>
+                <span class="stat-value" style="font-size:12px;color:var(--accent-purple);">🛡️ Active</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Session Modal -->
+    <div class="modal-overlay" id="modal-sessions" style="display:none;">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>📋 Session History</h2>
+          <button class="modal-close" id="modal-sessions-close">✕</button>
+        </div>
+        <div class="modal-body" id="sessions-list">
+          <div class="loading-text">Loading sessions...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div class="modal-overlay" id="modal-settings" style="display:none;">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>⚙️ Settings</h2>
+          <button class="modal-close" id="modal-settings-close">✕</button>
+        </div>
+        <div class="modal-body settings-body">
+          <div class="setting-group">
+            <label>Voice Model</label>
+            <select id="setting-tts-model">
+              <option value="coda">coda</option>
+              <option value="v1">v1</option>
+            </select>
+          </div>
+          <div class="setting-group">
+            <label>Speaker</label>
+            <select id="setting-tts-speaker">
+              <option value="celeste">celeste</option>
+              <option value="marcus">marcus</option>
+              <option value="kendrick">kendrick</option>
+            </select>
+          </div>
+          <div class="setting-group">
+            <label>Voice Speed</label>
+            <input type="range" id="setting-voice-speed" min="0.75" max="1.5" step="0.05" value="1.0" />
+            <span id="setting-voice-speed-val">1.00x</span>
+          </div>
+          <button class="btn-save-settings" id="btn-save-settings">Save Settings</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main App with version -->
+  <script type="module" src="js/app.js?v=2"></script>
+</body>
+</html>

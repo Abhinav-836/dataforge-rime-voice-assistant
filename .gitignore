@@ -1,0 +1,42 @@
+﻿# Secrets & Environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python & Virtual Environments
+__pycache__/
+*.py[cod]
+*.class
+venv/
+.venv/
+env/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Databases & Runtime Data
+data/
+*.db
+*.sqlite
+*.sqlite3
+latency_history.json
+
+# Logs & Temporary Files
+logs/
+*.log
+
+# Frontend & Dependencies
+node_modules/
+dist/
+.DS_Store
+Thumbs.db
+
+# IDE & Editor files
+.vscode/
+.idea/
+
+# Large Demo Artifacts
+demo/*.mp4
+demo/*.mov
