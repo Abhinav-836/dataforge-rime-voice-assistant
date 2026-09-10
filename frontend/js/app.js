@@ -16,17 +16,21 @@ let hasGreeted = false;
 
 document.addEventListener('DOMContentLoaded', async () => {
   console.log("🚀 Starting Voice Assistant");
-  
+
   // Init notifications
   notifications.init();
-  
+
   // Start timer
   metricsTracker.startTimer();
 
-  // Connect to LiveKit - SILENTLY (no toasts)
+  // Connect to LiveKit — silently (no toasts on success)
   try {
     await livekit.connect();
-    updateStatus('connected', 'Ready');
+    if (livekit.isConnected) {
+      updateStatus('connected', 'Ready');
+    } else {
+      updateStatus('error', 'Connection failed');
+    }
   } catch (e) {
     console.warn("LiveKit connection:", e);
     updateStatus('error', 'Connection failed');
@@ -44,14 +48,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         resetUI();
       }
     }
-    
+
     if (event === 'data_channel_message' && data) {
       // User transcript
       if (data.type === 'transcript' && data.sender === 'You' && data.is_final) {
         addMessage('user', data.text);
         updateStats();
       }
-      
+
       // Agent response
       if (data.type === 'agent_response') {
         addMessage('agent', data.text, data.version);
@@ -65,14 +69,14 @@ document.addEventListener('DOMContentLoaded', async () => {
           hasGreeted = true;
         }
       }
-      
+
       // Interruption
       if (data.type === 'interruption') {
         addInterruption(data.text);
         updateStatus('listening', 'Interrupted...');
         updateStats();
       }
-      
+
       // Tool events
       if (data.type === 'tool_start') {
         updateToolActivity(data.name, 'running', '');
@@ -90,7 +94,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         updateToolBadge();
       }
     }
-    
+
     if (event === 'turn_updated') {
       updateStats();
     }
@@ -119,13 +123,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       const input = document.getElementById('input-chat-text');
       const text = input?.value?.trim();
       if (!text) return;
-      
+
       input.value = '';
       input.disabled = true;
-      
+
       addMessage('user', text);
       updateStats();
-      
+
       const sent = await livekit.sendTextMessage(text);
       if (!sent) {
         notifications.error('Failed to send message');
@@ -176,7 +180,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Load settings
   loadSettings();
-  
+
   // Initial stats update
   setTimeout(updateStats, 500);
 });
@@ -185,7 +189,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 // Core Functions
 // ============================================================
 
-function toggleConversation() {
+async function toggleConversation() {
   const orb = document.getElementById('voice-orb');
   const orbLabel = document.getElementById('orb-label');
   const orbSubLabel = document.getElementById('orb-sub-label');
@@ -194,10 +198,26 @@ function toggleConversation() {
   const statusText = document.getElementById('status-text');
 
   if (!conversationActive) {
+    // FIXED (BUG 1/3/5): Guard before flipping the UI state.
+    // Without this, clicking the orb while LiveKit is still connecting
+    // would leave the UI stuck in "Listening" even though the mic never started.
+    if (!livekit.isConnected) {
+      notifications.warning('Still connecting to voice agent — please wait a moment and try again.');
+      return;
+    }
+
     // START
     conversationActive = true;
-    voiceVisualizer.startConversation();
-    
+
+    try {
+      // FIXED (BUG 3): await + error handling.
+      await voiceVisualizer.startConversation();
+    } catch (e) {
+      conversationActive = false;
+      notifications.error('Could not start microphone: ' + (e?.message || e));
+      return;
+    }
+
     if (orb) orb.classList.add('listening');
     if (orbLabel) {
       orbLabel.textContent = 'Listening...';
@@ -207,18 +227,18 @@ function toggleConversation() {
     if (orbGlow) orbGlow.classList.add('active');
     if (hangupBtn) hangupBtn.style.display = 'flex';
     if (statusText) statusText.textContent = 'Listening...';
-    
+
     updateStatus('listening', 'Listening...');
-    
-    // DO NOT send "Hello" - the agent will greet when it detects speech
-    // The agent's on_enter() will handle the greeting
-    
     notifications.success('🎤 Listening... Speak now!');
   } else {
     // PAUSE
     conversationActive = false;
-    voiceVisualizer.stopConversation();
-    
+    try {
+      await voiceVisualizer.stopConversation();
+    } catch (e) {
+      console.warn("stopConversation error:", e);
+    }
+
     if (orb) orb.classList.remove('listening', 'speaking');
     if (orbLabel) {
       orbLabel.textContent = 'Paused';
@@ -228,7 +248,7 @@ function toggleConversation() {
     if (orbGlow) orbGlow.classList.remove('active');
     if (hangupBtn) hangupBtn.style.display = 'none';
     if (statusText) statusText.textContent = 'Paused';
-    
+
     updateStatus('connected', 'Paused');
     notifications.info('⏸️ Paused');
   }
@@ -249,7 +269,7 @@ function resetUI() {
   const orbSubLabel = document.getElementById('orb-sub-label');
   const orbGlow = document.getElementById('orb-glow');
   const hangupBtn = document.getElementById('btn-hangup');
-  
+
   if (orb) orb.classList.remove('listening', 'speaking');
   if (orbLabel) {
     orbLabel.textContent = 'Tap to start';
@@ -280,19 +300,19 @@ function updateStatus(dotState, text) {
 function addMessage(type, text, version) {
   const container = document.getElementById('transcript-messages');
   if (!container) return;
-  
+
   const empty = container.querySelector('.empty-state');
   if (empty) empty.remove();
 
   const msg = document.createElement('div');
   msg.className = `message ${type}`;
-  
+
   let versionHtml = '';
   if (version) {
     versionHtml = `<span style="font-size:10px;color:var(--accent-purple);margin-left:6px;">v${version}</span>`;
   }
-  
-  const time = new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+
+  const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   msg.innerHTML = `
     <div class="message-content">${escapeHtml(text)}</div>
     <div class="message-meta">${type === 'user' ? 'You' : 'Agent'} • ${time} ${versionHtml}</div>
@@ -304,7 +324,7 @@ function addMessage(type, text, version) {
 function addInterruption(text) {
   const container = document.getElementById('transcript-messages');
   if (!container) return;
-  
+
   const banner = document.createElement('div');
   banner.className = 'interruption-banner';
   banner.innerHTML = `⚡ Interrupted: ${escapeHtml(text)}`;
@@ -326,14 +346,14 @@ function updateStats() {
   try {
     const versionEl = document.getElementById('stat-version');
     if (versionEl) versionEl.textContent = `v${state.turn.version}`;
-    
+
     const turnCount = document.querySelectorAll('.message.user, .message.agent').length;
     const turnsEl = document.getElementById('stat-turns');
     if (turnsEl) turnsEl.textContent = turnCount || 0;
-    
+
     const interEl = document.getElementById('stat-interruptions');
     if (interEl) interEl.textContent = state.turn.interruptionCount || 0;
-    
+
     const voiceStatus = document.getElementById('voice-status-text');
     if (voiceStatus) {
       if (conversationActive) {
@@ -370,13 +390,13 @@ function updateLatency(ms) {
 function updateToolActivity(toolName, status, detail) {
   const container = document.getElementById('side-tool-activity-list');
   if (!container) return;
-  
+
   const empty = document.getElementById('side-tool-empty');
   if (empty) empty.remove();
-  
+
   const existingItems = container.querySelectorAll('.tool-activity-item');
   let found = false;
-  
+
   existingItems.forEach(item => {
     const nameEl = item.querySelector('.tool-name');
     if (nameEl && nameEl.textContent === toolName) {
@@ -385,7 +405,7 @@ function updateToolActivity(toolName, status, detail) {
         let statusClass = 'running';
         let statusText = '⏳';
         let statusColor = 'var(--accent-cyan)';
-        
+
         if (status === 'completed') {
           statusClass = 'completed';
           statusText = '✅';
@@ -395,7 +415,7 @@ function updateToolActivity(toolName, status, detail) {
           statusText = '❌';
           statusColor = 'var(--accent-rose)';
         }
-        
+
         statusEl.className = `tool-status ${statusClass}`;
         statusEl.style.color = statusColor;
         statusEl.textContent = `${statusText} ${detail || ''}`;
@@ -403,7 +423,7 @@ function updateToolActivity(toolName, status, detail) {
       }
     }
   });
-  
+
   if (!found && status === 'running') {
     const item = document.createElement('div');
     item.className = 'tool-activity-item';
@@ -413,7 +433,7 @@ function updateToolActivity(toolName, status, detail) {
     `;
     container.prepend(item);
   }
-  
+
   // Keep only last 8
   while (container.children.length > 8) {
     container.removeChild(container.lastChild);
@@ -424,10 +444,10 @@ function updateToolBadge() {
   const container = document.getElementById('side-tool-activity-list');
   const badge = document.getElementById('badge-active-tools');
   if (!badge || !container) return;
-  
+
   const running = container.querySelectorAll('.tool-status.running').length;
   const total = container.querySelectorAll('.tool-activity-item').length;
-  
+
   if (total === 0) {
     badge.textContent = '0 running';
     let empty = document.getElementById('side-tool-empty');
@@ -451,15 +471,15 @@ async function showSessionsModal() {
   const modal = document.getElementById('modal-sessions');
   const list = document.getElementById('sessions-list');
   if (!modal || !list) return;
-  
+
   modal.style.display = 'flex';
   list.innerHTML = '<div class="loading-text">Loading sessions...</div>';
-  
+
   try {
     const resp = await fetch('/api/sessions?limit=20');
     if (!resp.ok) throw new Error('Failed to load');
     const data = await resp.json();
-    
+
     if (data.sessions && data.sessions.length > 0) {
       list.innerHTML = data.sessions.map(s => `
         <div class="session-item">
@@ -494,7 +514,7 @@ async function loadSettings() {
       const speakerEl = document.getElementById('setting-tts-speaker');
       const speedEl = document.getElementById('setting-voice-speed');
       const speedValEl = document.getElementById('setting-voice-speed-val');
-      
+
       if (modelEl) modelEl.value = data.voice_model || 'coda';
       if (speakerEl) speakerEl.value = data.voice_speaker || 'celeste';
       if (speedEl) {
@@ -516,7 +536,7 @@ async function saveSettings() {
     voice_speed: parseFloat(document.getElementById('setting-voice-speed')?.value || 1.0),
     auto_speak: true
   };
-  
+
   try {
     const resp = await fetch('/api/settings', {
       method: 'PUT',

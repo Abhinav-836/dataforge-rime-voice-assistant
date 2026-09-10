@@ -1,11 +1,14 @@
 /**
  * LiveKit Client Integration
  * Binds browser WebRTC audio directly to the LiveKit Agent backend.
+ *
+ * NOTE: voiceVisualizer is imported lazily inside the TrackSubscribed handler
+ * to avoid a circular import (livekit.js ↔ voice.js). This keeps module
+ * initialization deterministic across browsers and bundlers.
  */
 
 import { state } from './state.js';
 import { notifications } from './notifications.js';
-import { voiceVisualizer } from './voice.js';
 
 class LiveKitManager {
   constructor() {
@@ -67,7 +70,9 @@ class LiveKitManager {
       const sessionResp = await fetch("/api/session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({})
+        body: JSON.stringify({
+          identity: "user-" + Math.random().toString(36).slice(2, 8)
+        })
       });
       if (sessionResp.ok) {
         const data = await sessionResp.json();
@@ -95,7 +100,6 @@ class LiveKitManager {
 
   async connect() {
     state.setConnectionStatus("connecting");
-    // Silent connection - no toast
 
     try {
       const creds = await this.fetchToken();
@@ -103,7 +107,6 @@ class LiveKitManager {
         console.warn("LiveKit credentials not configured. Running in interactive demo mode.");
         state.setConnectionStatus("connected");
         this.isConnected = true;
-        // Silent success - no toast
         return true;
       }
 
@@ -114,6 +117,16 @@ class LiveKitManager {
       this.room = new LivekitClient.Room({
         adaptiveStream: true,
         dynacast: true,
+        // FIXED (echo bug): explicit capture defaults for every mic track
+        // this Room publishes, instead of relying on unstated SDK
+        // defaults. Without echoCancellation explicitly on, some
+        // browser/OS/driver combinations let the TTS output picked up
+        // by the mic loop straight back into Deepgram STT.
+        audioCaptureDefaults: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
       });
 
       // Track Subscribed (Agent speaking via Rime TTS)
@@ -130,10 +143,15 @@ class LiveKitManager {
           this.unlockAudio();
 
           if (track.mediaStream) {
-            voiceVisualizer.attachRemoteAudio(track.mediaStream);
+            // Lazy import to break the circular dependency with voice.js.
+            import('./voice.js')
+              .then(({ voiceVisualizer }) => {
+                voiceVisualizer.attachRemoteAudio(track.mediaStream);
+              })
+              .catch((err) => {
+                console.warn("Could not lazily import voice visualizer:", err);
+              });
           }
-          // Silent - no toast for audio connection
-          state.notify("agent_audio_started", track);
         }
       });
 
@@ -173,15 +191,14 @@ class LiveKitManager {
       // Connection state changes
       this.room.on(LivekitClient.RoomEvent.Disconnected, () => {
         this.isConnected = false;
+        this.localAudioTrack = null;
         state.setConnectionStatus("disconnected");
-        // Silent - no toast
       });
 
       await this.room.connect(creds.url, creds.token);
       this.isConnected = true;
       state.setConnectionStatus("connected");
       state.connection.room = this.room;
-      // Silent success - no toast
 
       // Ensure audio element is created
       this.getOrCreateAudioElement();
@@ -200,11 +217,37 @@ class LiveKitManager {
     try {
       await this.unlockAudio();
       await this.room.localParticipant.setMicrophoneEnabled(enable);
+
+      // FIXED (echo bug): capture and expose the SAME local track LiveKit
+      // just published, so voice.js's visualizer can reuse it instead of
+      // opening an independent getUserMedia() stream.
+      if (enable) {
+        const pub = this.room.localParticipant.getTrackPublication(
+          LivekitClient.Track.Source.Microphone
+        );
+        this.localAudioTrack = pub && pub.track ? pub.track : null;
+      } else {
+        this.localAudioTrack = null;
+      }
+
       state.audio.isMicActive = enable;
       state.notify("mic_state_changed", enable);
     } catch (e) {
       console.warn("Could not toggle microphone via LiveKit:", e);
     }
+  }
+
+  /**
+   * Returns the raw MediaStreamTrack LiveKit is currently publishing for
+   * the mic, or null if not yet available (not connected, or still
+   * negotiating). voice.js should prefer this over calling
+   * getUserMedia() itself.
+   */
+  getLocalMicMediaStreamTrack() {
+    if (this.localAudioTrack && this.localAudioTrack.mediaStreamTrack) {
+      return this.localAudioTrack.mediaStreamTrack;
+    }
+    return null;
   }
 
   async sendTextMessage(text) {
@@ -233,8 +276,8 @@ class LiveKitManager {
       this.room = null;
     }
     this.isConnected = false;
+    this.localAudioTrack = null;
     state.setConnectionStatus("disconnected");
-    // Silent - no toast
   }
 }
 

@@ -1,9 +1,17 @@
 /**
  * Voice Audio Visualizer and Microphone Interaction
+ * 
+ * FIXED (echo bug): This file no longer opens its own getUserMedia() stream.
+ * Instead, it reuses the single mic track that livekit.js already captured
+ * and published. Two concurrent OS-level mic captures were the root cause
+ * of the audible echo/feedback — the visualizer's capture had no
+ * echo-cancellation constraints, so TTS output picked up by the mic looped
+ * straight back into Deepgram STT.
  */
 
 import { state } from './state.js';
 import { livekit } from './livekit.js';
+import { notifications } from './notifications.js';
 
 class VoiceVisualizer {
   constructor() {
@@ -33,13 +41,38 @@ class VoiceVisualizer {
         return true;
       }
 
+      // Clean up any previous stream
       if (this.micStream) {
         this.micStream.getTracks().forEach(track => track.stop());
+        this.micStream = null;
       }
 
-      this.micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      this.micTrack = this.micStream.getAudioTracks()[0];
-      
+      // FIXED (echo bug): Reuse the mic track LiveKit already captured and
+      // published, instead of opening a second independent getUserMedia()
+      // capture. Two simultaneous OS-level mic captures compete for the same
+      // physical input and cause audible echo/feedback.
+      const existingTrack = livekit.getLocalMicMediaStreamTrack();
+
+      if (existingTrack) {
+        this.micTrack = existingTrack;
+        this.micStream = new MediaStream([existingTrack]);
+      } else {
+        // Fallback: only if LiveKit hasn't captured yet. Should be rare
+        // because startConversation() waits for LiveKit to be connected.
+        console.warn(
+          "voice.js: LiveKit mic track not available yet; using fallback capture. " +
+          "This may cause echo if it runs concurrently with LiveKit's capture."
+        );
+        this.micStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+        this.micTrack = this.micStream.getAudioTracks()[0];
+      }
+
       this.analyser = this.audioContext.createAnalyser();
       this.analyser.fftSize = 64;
       const source = this.audioContext.createMediaStreamSource(this.micStream);
@@ -195,27 +228,44 @@ class VoiceVisualizer {
   }
 
   async startConversation() {
+    // FIXED (BUG 6): Guard against clicking the orb before LiveKit is
+    // connected. Without this, enableMicrophone() silently no-ops and the
+    // visualizer falls back to a second getUserMedia() capture — which is
+    // exactly the echo bug we just fixed.
+    if (!livekit.isConnected) {
+      notifications.warning("Still connecting to voice agent — please wait a moment and try again.");
+      return;
+    }
+
     // If already started and mic is off, just re-enable
     if (this.conversationStarted && !this.isListening) {
       this.isListening = true;
       state.audio.isMicActive = true;
+
+      // FIXED (echo bug): enable LiveKit mic FIRST so its track exists,
+      // then attach the visualizer to that same track (no second capture).
       await livekit.enableMicrophone(true);
-      
+      await this.initAudio();
+
       const orb = document.getElementById('voice-orb');
       if (orb) {
         orb.classList.add('listening');
       }
       return;
     }
-    
+
     // First time starting
     if (!this.conversationStarted) {
       this.conversationStarted = true;
       this.isListening = true;
       state.audio.isMicActive = true;
+
+      // FIXED (echo bug): order matters. LiveKit captures the mic first
+      // (with echoCancellation: true), then the visualizer reuses that
+      // exact track. Never the other way around.
       await livekit.enableMicrophone(true);
       await this.initAudio();
-      
+
       const orb = document.getElementById('voice-orb');
       if (orb) {
         orb.classList.add('listening');
@@ -227,7 +277,17 @@ class VoiceVisualizer {
     this.isListening = false;
     state.audio.isMicActive = false;
     await livekit.enableMicrophone(false);
-    
+
+    // FIXED (echo bug): release the local reference to LiveKit's track
+    // and tear down the analyser graph. Do NOT stop() the track itself —
+    // LiveKit still owns it and will handle teardown when it disables the
+    // mic. Calling stop() here would kill LiveKit's published track.
+    if (this.micStream) {
+      this.micStream = null;
+    }
+    this.micTrack = null;
+    this.analyser = null;
+
     const orb = document.getElementById('voice-orb');
     if (orb) {
       orb.classList.remove('listening', 'speaking');

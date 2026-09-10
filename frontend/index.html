@@ -4,17 +4,17 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>DataForge Voice Assistant</title>
-  
-  <!-- LiveKit Client SDK -->
-  <script src="livekit-client.umd.js?v=2"></script>
+
+  <!-- LiveKit Client SDK (vendored, with CDN fallback) -->
+  <script src="livekit-client.umd.js"></script>
   <script>
     if (typeof LivekitClient === "undefined") {
       document.write('<script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"><\/script>');
     }
   </script>
-  
-  <!-- ONLY these CSS files with version -->
-  <link rel="stylesheet" href="css/main.css?v=2" />
+
+  <!-- Stylesheet -->
+  <link rel="stylesheet" href="css/main.css" />
 </head>
 <body>
   <div id="app">
@@ -36,7 +36,7 @@
         <button class="icon-btn" id="btn-settings" title="Settings">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="3"/>
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06-.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
           </svg>
         </button>
         <button class="icon-btn" id="btn-hangup" title="End Session" style="display:none;">
@@ -108,7 +108,7 @@
               </div>
               <div class="orb-label" id="orb-label">Tap to start</div>
               <div class="orb-sub-label" id="orb-sub-label">Press Space to toggle</div>
-              
+
               <!-- Waveforms -->
               <div class="waveform-row">
                 <div class="waveform-container" id="stage-wave-left">
@@ -159,10 +159,10 @@
           <!-- Input Bar -->
           <div class="input-bar">
             <form class="input-form" id="form-chat-input">
-              <input 
-                type="text" 
-                id="input-chat-text" 
-                placeholder="Type a message or tap the orb..." 
+              <input
+                type="text"
+                id="input-chat-text"
+                placeholder="Type a message or tap the orb..."
                 autocomplete="off"
               />
               <button type="submit" class="send-btn" id="send-btn">
@@ -276,7 +276,7 @@
     </div>
   </div>
 
-  <!-- Main App with version -->
-  <script type="module" src="js/app.js?v=2"></script>
+  <!-- Main App -->
+  <script type="module" src="js/app.js"></script>
 </body>
 </html>

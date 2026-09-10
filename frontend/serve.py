@@ -157,6 +157,13 @@ class ProductionServerHandler(http.server.SimpleHTTPRequestHandler):
                 "service": "dataforge-voice-agent"
             })
 
+        # FIXED (BUG 9): /ready endpoint was advertised but never implemented.
+        if path == "/ready":
+            return self._send_json_response(200, {
+                "status": "ready",
+                "timestamp": time.time(),
+            })
+
         # API routes...
         if path.startswith("/api/"):
             if _is_rate_limited(client_ip):
@@ -337,6 +344,11 @@ class ProductionServerHandler(http.server.SimpleHTTPRequestHandler):
         return self._send_json_response(404, {"error": f"PUT {path} not found"})
 
     def end_headers(self):
+        # FIXED (BUG 17): no-cache for HTML/CSS/JS so judges always see fresh code
+        if self.path.endswith(('.css', '.js', '.html')) or self.path == '/':
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
         self._send_security_headers()
         super().end_headers()
 
