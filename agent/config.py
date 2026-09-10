@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import List, Optional
 from dotenv import load_dotenv
 
-# Ensure root .env is loaded regardless of current working directory
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -40,9 +39,11 @@ class AppConfig:
         # Deepgram STT
         self.deepgram_api_key: str = os.getenv("DEEPGRAM_API_KEY", "").strip()
 
-        # LLM Providers
-        self.groq_api_key: str = os.getenv("GROQ_API_KEY", "").strip()
+        # LLM Providers (OpenAI primary, Groq fallback)
         self.openai_api_key: str = os.getenv("OPENAI_API_KEY", "").strip()
+        self.openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+        self.groq_api_key: str = os.getenv("GROQ_API_KEY", "").strip()
+        self.groq_model: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b").strip()
 
         # Financial Data
         self.finnhub_api_key: str = os.getenv("FINNHUB_API_KEY", "").strip()
@@ -71,7 +72,7 @@ class AppConfig:
         self.log_level: str = os.getenv("LOG_LEVEL", "INFO").upper().strip()
 
     def validate_agent_config(self) -> List[str]:
-        """Validate required configuration for running the voice agent. Returns list of errors."""
+        """Validate required configuration for running the voice agent."""
         errors = []
         if not self.rime_api_key:
             errors.append("RIME_API_KEY is required for voice synthesis.")
@@ -83,15 +84,18 @@ class AppConfig:
             errors.append("LIVEKIT_API_SECRET is required for WebRTC transport.")
         if not self.deepgram_api_key:
             errors.append("DEEPGRAM_API_KEY is required for speech transcription.")
-        if not (self.groq_api_key or self.openai_api_key):
-            errors.append("Either GROQ_API_KEY or OPENAI_API_KEY must be provided for LLM reasoning.")
+        if not (self.openai_api_key or self.groq_api_key):
+            errors.append("Either OPENAI_API_KEY (primary) or GROQ_API_KEY (fallback) must be provided.")
         return errors
 
     def validate_server_config(self) -> List[str]:
         """Validate configuration required for running the HTTP server."""
         errors = []
         if not self.livekit_api_key or not self.livekit_api_secret or not self.livekit_url:
-            errors.append("LiveKit credentials (LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) are required to mint session tokens.")
+            errors.append(
+                "LiveKit credentials (LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) "
+                "are required to mint session tokens."
+            )
         return errors
 
     def get_masked_summary(self) -> dict:
@@ -101,8 +105,10 @@ class AppConfig:
             "livekit_api_key": mask_secret(self.livekit_api_key),
             "rime_configured": bool(self.rime_api_key),
             "deepgram_configured": bool(self.deepgram_api_key),
-            "groq_configured": bool(self.groq_api_key),
             "openai_configured": bool(self.openai_api_key),
+            "openai_model": self.openai_model,
+            "groq_configured": bool(self.groq_api_key),
+            "groq_model": self.groq_model,
             "finnhub_configured": bool(self.finnhub_api_key),
             "allowed_origins": self.allowed_origins,
             "database_path": str(self.database_path),

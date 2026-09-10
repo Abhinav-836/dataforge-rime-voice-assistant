@@ -1,5 +1,5 @@
 """
-LiveKit transport with flexible LLM provider support, Rime TTS, and SQLite telemetry.
+LiveKit transport with OpenAI primary / Groq fallback, Rime TTS, and SQLite telemetry.
 
 Turn version fencing and tool execution tracking are integrated directly with SQLite
 persistence and real-time LiveKit room data channel broadcasts.
@@ -22,6 +22,7 @@ from livekit.agents import (
     function_tool,
     llm,
 )
+from livekit.agents import llm as llm_module
 from livekit.plugins import silero
 from livekit.plugins import deepgram
 from livekit.plugins import openai
@@ -45,21 +46,41 @@ logger = get_logger(__name__)
 
 server = AgentServer()
 
+# Cap on how many past items we retain in the LLM chat context.
+MAX_CHAT_CONTEXT_ITEMS = 16
+
 
 def _build_llm():
-    """Build LLM based on available API keys."""
-    if os.getenv("GROQ_API_KEY"):
-        if not HAS_GROQ:
-            logger.warning("GROQ_API_KEY set but livekit-plugins-groq not installed")
-        else:
-            logger.info("Using Groq LLM (FREE tier)")
-            return groq.LLM(model="openai/gpt-oss-20b")
+    """
+    OpenAI is the primary provider. Groq is the fallback.
+
+    FallbackAdapter tries providers in order and fails over on retryable
+    errors (429, 5xx, connection errors). Because OpenAI and Groq have
+    separate rate limits and separate billing accounts, the fallback is
+    effectively a second independent quota.
+    """
+    primary = None
+    fallback = None
 
     if os.getenv("OPENAI_API_KEY"):
-        logger.info("Using OpenAI LLM")
-        return openai.LLM(model="gpt-4o-mini")
+        oa_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        logger.info(f"Primary LLM: OpenAI (model={oa_model})")
+        primary = openai.LLM(model=oa_model)
 
-    logger.warning("No LLM API key found — using fallback echo for testing")
+    if os.getenv("GROQ_API_KEY") and HAS_GROQ:
+        gq_model = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+        logger.info(f"Fallback LLM: Groq (model={gq_model})")
+        fallback = groq.LLM(model=gq_model)
+
+    if primary and fallback:
+        return llm_module.FallbackAdapter([primary, fallback])
+    if primary:
+        return primary
+    if fallback:
+        logger.warning("Only Groq available — running without OpenAI primary")
+        return fallback
+
+    logger.warning("No LLM API key found (need OPENAI_API_KEY or GROQ_API_KEY)")
     return None
 
 
@@ -80,29 +101,9 @@ class ContinuityAgent(Agent):
     def __init__(self, orchestrator: Orchestrator, session_id: str, room=None):
         super().__init__(
             instructions=(
-                "You are a helpful voice assistant. You can help with:\n"
-                "1. Stock prices: call stock_quote with ticker (e.g. AAPL, TSLA, NVDA). "
-                "By default this returns the price. If the user asks specifically for "
-                "trading volume (e.g. 'what's the volume on Apple'), call stock_quote "
-                "again with field='volume'.\n"
-                "2. Stock comparisons: ONLY call compare_stocks when the user asks to "
-                "COMPARE two or more stocks. For a single stock, ALWAYS use stock_quote.\n"
-                "3. Weather: call get_weather_info with a city name\n"
-                "4. Time/Date: call get_time_info (e.g., 'Tokyo', 'America/New_York')\n"
-                "5. Stock news: call get_news with a ticker symbol\n"
-                "6. General questions: call general_search with your query\n\n"
-                "Use these exact tickers for ambiguous companies: Google/Alphabet "
-                "-> GOOGL (not GOOG). When in doubt about a ticker, prefer the "
-                "primary/most commonly traded class of shares.\n\n"
-                "If the user corrects themselves mid-request (says 'actually', "
-                "'wait', 'no', or names a different company), treat it as a new "
-                "request — do not report on the old one. This also applies if they "
-                "switch from asking about price to asking about volume on the same "
-                "ticker, or vice versa — treat that switch as a new request too.\n\n"
-                "Keep replies brief: one to two sentences, written to be spoken "
-                "aloud, not read. For stock prices, state the price and percent change plainly, "
-                "e.g. 'Tesla is at $242.10, up 1.8% today.' "
-                "For comparisons: 'Apple is at $150.20 up 0.5%, Tesla is at $242.10 up 1.8%'"
+                "Voice assistant for stock prices, stock comparisons, weather, "
+                "time, stock news, and general web search. Use the provided tools. "
+                "Never invent a ticker symbol. Reply in one or two spoken sentences."
             ),
         )
         self.orchestrator = orchestrator
@@ -111,7 +112,7 @@ class ContinuityAgent(Agent):
         self.last_broadcast_agent_text = ""
         self.turn_number = 0
         self.current_user_text = ""
-        self._has_greeted = False  # Prevent duplicate greetings
+        self._has_greeted = False
 
     async def broadcast(self, event_type: str, data: dict) -> None:
         """Broadcast real-time JSON events across the LiveKit Room DataChannel."""
@@ -123,10 +124,30 @@ class ContinuityAgent(Agent):
         except Exception as e:
             logger.debug(f"Could not broadcast data channel event {event_type}: {e}")
 
+    def _truncate_chat_ctx(self, turn_ctx: llm.ChatContext) -> None:
+        """
+        Bound the chat context before each LLM turn.
+
+        ChatContext.truncate() is the supported API in livekit-agents 1.7/1.8 —
+        the AgentSession constructor does not accept max_chat_history, so
+        truncation is done here instead. The turn_ctx passed to
+        on_user_turn_completed is a per-turn working copy.
+        """
+        try:
+            if len(turn_ctx.items) > MAX_CHAT_CONTEXT_ITEMS:
+                turn_ctx.truncate(max_items=MAX_CHAT_CONTEXT_ITEMS)
+                logger.debug(
+                    f"Truncated chat context to {MAX_CHAT_CONTEXT_ITEMS} items"
+                )
+        except Exception as e:
+            logger.debug(f"Chat context truncate skipped: {e}")
+
     async def on_user_turn_completed(
         self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
     ) -> None:
         """Called when user speech ends, right before LLM reasoning."""
+        self._truncate_chat_ctx(turn_ctx)
+
         text = new_message.text_content
         logger.info(f"User turn completed: '{text}'")
         if text:
@@ -138,7 +159,6 @@ class ContinuityAgent(Agent):
                 text, is_final=True
             )
 
-            # Persist user turn in SQLite
             try:
                 repo.record_turn(
                     session_id=self.session_id,
@@ -155,486 +175,281 @@ class ContinuityAgent(Agent):
                 await self.broadcast("interruption", {
                     "version": version,
                     "text": text,
-                    "intent": intent
+                    "intent": intent,
                 })
 
     async def on_enter(self) -> None:
         """Called when the agent enters the session. Only greet once."""
-        # Only send greeting if not already greeted
         if not self._has_greeted:
             self._has_greeted = True
             await self.session.generate_reply(
-                instructions="Greet the user briefly, introduce yourself as a voice assistant that can help with stocks, weather, time, news, and general questions. Keep it to one sentence."
+                instructions=(
+                    "Greet the user briefly in one sentence as a voice assistant "
+                    "that helps with stocks, weather, time, news, and general questions."
+                )
             )
+
+    # =============================================
+    # Shared tool wrapper
+    # =============================================
+    async def _run_tool(
+        self,
+        tool_name: str,
+        params: dict,
+        coro,
+        spoken_formatter,
+        broadcast_extra: Optional[dict] = None,
+    ) -> str:
+        version = self.orchestrator.state.turn_version
+        t0 = time.time()
+
+        self.orchestrator.mark_tool_started()
+
+        tool_db_id = repo.record_tool_execution(
+            session_id=self.session_id,
+            turn_version=version,
+            tool_name=tool_name,
+            parameters=params,
+            status="running",
+        )
+
+        await self.broadcast("tool_start", {
+            "name": tool_name,
+            "version": version,
+            **(broadcast_extra or {}),
+        })
+
+        result = await self.orchestrator.tool_mgr.run(version, coro)
+        latency_ms = round((time.time() - t0) * 1000, 1)
+
+        self.orchestrator.mark_tool_resolved()
+
+        if result is None:
+            repo.update_tool_execution(
+                tool_db_id, status="cancelled",
+                latency_ms=latency_ms,
+                error="Superseded by user interruption",
+            )
+            await self.broadcast("tool_cancel", {
+                "name": tool_name,
+                "stale_version": version,
+                "reason": "User interruption / superseded",
+                **(broadcast_extra or {}),
+            })
+            return "That request was superseded by a newer one — no result to report."
+
+        if isinstance(result, dict) and "error" in result:
+            repo.update_tool_execution(
+                tool_db_id, status="error",
+                latency_ms=latency_ms, error=result["error"],
+            )
+            await self.broadcast("tool_complete", {
+                "name": tool_name, "version": version,
+                "error": result["error"], "latency_ms": latency_ms,
+            })
+            return f"Couldn't complete {tool_name}: {result['error']}"
+
+        repo.update_tool_execution(
+            tool_db_id, status="success",
+            latency_ms=latency_ms, result=result,
+        )
+
+        spoken_text = spoken_formatter(result)
+        self.last_broadcast_agent_text = spoken_text
+
+        self.orchestrator.mark_response_spoken()
+
+        await self.broadcast("tool_complete", {
+            "name": tool_name, "version": version,
+            "data": result, "latency_ms": latency_ms,
+        })
+        await self.broadcast("agent_response", {
+            "text": spoken_text, "version": version,
+        })
+        return spoken_text
 
     # =============================================
     # STOCK TOOLS
     # =============================================
 
     @function_tool()
-    async def stock_quote(self, context: RunContext, symbol: str, field: str = "price") -> str:
-        """Look up a live stock quote for a single ticker."""
+    async def stock_quote(
+        self,
+        context: RunContext,
+        symbol: str,
+        field: Optional[str] = "price",
+    ) -> str:
+        """
+        Look up a live stock quote for a single ticker.
+
+        Args:
+            symbol: Ticker symbol, e.g. AAPL, TSLA, NVDA.
+            field: Either "price" (default) or "volume".
+        """
         sym = symbol.strip().upper()
-        version = self.orchestrator.state.turn_version
-        intent = {"symbols": [sym], "field": field}
-        t0 = time.time()
-        
-        # Mark tool start on orchestrator
-        self.orchestrator.mark_tool_started()
+        field_value = (field or "price").lower()
+        intent = {"symbols": [sym], "field": field_value}
 
-        tool_db_id = repo.record_tool_execution(
-            session_id=self.session_id,
-            turn_version=version,
-            tool_name="stock_quote",
-            parameters={"symbol": sym, "field": field},
-            status="running",
-        )
-
-        await self.broadcast("tool_start", {
-            "name": f"stock_quote({sym})",
-            "symbol": sym,
-            "field": field,
-            "version": version
-        })
-
-        result = await self.orchestrator.tool_mgr.run(
-            version, get_stock_quote(intent)
-        )
-        latency_ms = round((time.time() - t0) * 1000, 1)
-        
-        # Mark tool resolved
-        self.orchestrator.mark_tool_resolved()
-
-        if result is None:
-            repo.update_tool_execution(
-                tool_db_id,
-                status="cancelled",
-                latency_ms=latency_ms,
-                error="Superseded by user interruption"
-            )
-            await self.broadcast("tool_cancel", {
-                "name": f"stock_quote({sym})",
-                "symbol": sym,
-                "stale_version": version,
-                "reason": "User interruption / superseded"
-            })
-            return "That request was superseded by a newer one — no result to report."
-
-        if "error" in result:
-            repo.update_tool_execution(
-                tool_db_id,
-                status="error",
-                latency_ms=latency_ms,
-                error=result["error"]
-            )
-            await self.broadcast("tool_complete", {
-                "name": f"stock_quote({sym})",
-                "version": version,
-                "error": result["error"],
-                "latency_ms": latency_ms
-            })
-            return f"Couldn't get data for {sym}: {result['error']}"
-
-        repo.update_tool_execution(
-            tool_db_id,
-            status="success",
-            latency_ms=latency_ms,
-            result=result
-        )
-
-        if result.get("field") == "volume" and result.get("note"):
-            spoken_text = result["note"]
-        else:
-            pct_val = result.get('percent_change') or 0.0
-            change_val = result.get('change') or 0.0
-            spoken_text = (
+        def fmt(result: dict) -> str:
+            pct_val = result.get("percent_change") or 0.0
+            if result.get("field") == "volume" and result.get("note"):
+                return result["note"]
+            return (
                 f"{result['symbol']} is at ${result['current_price']}, "
                 f"{'up' if pct_val >= 0 else 'down'} "
                 f"{abs(pct_val):.2f}% today."
             )
 
-        self.last_broadcast_agent_text = spoken_text
-        
-        # Mark response spoken - this will trigger metrics logging
-        self.orchestrator.mark_response_spoken()
-        
-        self.turn_number += 1
-
-        repo.record_turn(
-            session_id=self.session_id,
-            turn_number=self.turn_number,
-            turn_version=version,
-            sender="agent",
-            text=spoken_text,
-            latency_ms=latency_ms,
+        return await self._run_tool(
+            tool_name="stock_quote",
+            params={"symbol": sym, "field": field_value},
+            coro=get_stock_quote(intent),
+            spoken_formatter=fmt,
+            broadcast_extra={"symbol": sym, "field": field_value},
         )
 
-        await self.broadcast("tool_complete", {
-            "name": f"stock_quote({sym})",
-            "version": version,
-            "data": result,
-            "latency_ms": latency_ms
-        })
-        await self.broadcast("agent_response", {
-            "text": spoken_text,
-            "version": version,
-            "stock_data": {
-                "symbol": result["symbol"],
-                "name": result["symbol"],
-                "price": f"${result['current_price']}",
-                "change": f"{'+' if change_val >= 0 else ''}{change_val:.2f} ({'+' if pct_val >= 0 else ''}{pct_val:.2f}%)",
-                "time": "Real-time",
-                "isPositive": pct_val >= 0
-            }
-        })
-        return spoken_text
-
     @function_tool()
-    async def compare_stocks(self, context: RunContext, symbols: str, field: str = "price") -> str:
-        """Compare live stock quotes for multiple tickers. ONLY use when user asks to compare 2+ stocks."""
+    async def compare_stocks(
+        self,
+        context: RunContext,
+        symbols: str,
+        field: Optional[str] = "price",
+    ) -> str:
+        """
+        Compare live stock quotes for two or more tickers.
+        Use ONLY when the user explicitly asks to compare.
+
+        Args:
+            symbols: Comma-separated list, e.g. "AAPL,TSLA".
+            field: Either "price" (default) or "volume".
+        """
         symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
-        
-        # Guard: compare_stocks requires at least 2 symbols
+
         if len(symbol_list) < 2:
             return "I need at least two ticker symbols to compare. For a single stock, please use stock_quote."
 
-        version = self.orchestrator.state.turn_version
-        intent = {"symbols": symbol_list, "field": field, "is_comparison": True}
-        t0 = time.time()
-        
-        self.orchestrator.mark_tool_started()
+        field_value = (field or "price").lower()
+        intent = {"symbols": symbol_list, "field": field_value, "is_comparison": True}
 
-        tool_db_id = repo.record_tool_execution(
-            session_id=self.session_id,
-            turn_version=version,
+        def fmt(result: dict) -> str:
+            parts = []
+            for data in result.get("results", []):
+                price = data["current_price"]
+                change = data["percent_change"]
+                direction = "up" if change >= 0 else "down"
+                parts.append(f"{data['symbol']} at ${price} {direction} {abs(change):.2f}%")
+            return " vs ".join(parts) if parts else "No comparison data available."
+
+        return await self._run_tool(
             tool_name="compare_stocks",
-            parameters={"symbols": symbol_list, "field": field},
-            status="running",
+            params={"symbols": symbol_list, "field": field_value},
+            coro=compare_stocks(intent),
+            spoken_formatter=fmt,
+            broadcast_extra={"symbols": symbol_list},
         )
-
-        await self.broadcast("tool_start", {
-            "name": f"compare_stocks({','.join(symbol_list)})",
-            "symbols": symbol_list,
-            "version": version
-        })
-
-        result = await self.orchestrator.tool_mgr.run(
-            version, compare_stocks(intent)
-        )
-        latency_ms = round((time.time() - t0) * 1000, 1)
-        
-        self.orchestrator.mark_tool_resolved()
-
-        if result is None:
-            repo.update_tool_execution(
-                tool_db_id,
-                status="cancelled",
-                latency_ms=latency_ms,
-                error="Superseded by user interruption"
-            )
-            await self.broadcast("tool_cancel", {
-                "name": f"compare_stocks({','.join(symbol_list)})",
-                "stale_version": version,
-                "reason": "User interruption / superseded"
-            })
-            return "That request was superseded by a newer one — no result to report."
-
-        if "error" in result:
-            repo.update_tool_execution(
-                tool_db_id,
-                status="error",
-                latency_ms=latency_ms,
-                error=result["error"]
-            )
-            await self.broadcast("tool_complete", {
-                "name": f"compare_stocks({','.join(symbol_list)})",
-                "version": version,
-                "error": result["error"],
-                "latency_ms": latency_ms
-            })
-            return f"Couldn't compare: {result['error']}"
-
-        repo.update_tool_execution(
-            tool_db_id,
-            status="success",
-            latency_ms=latency_ms,
-            result=result
-        )
-
-        parts = []
-        for data in result.get("results", []):
-            price = data["current_price"]
-            change = data["percent_change"]
-            direction = "up" if change >= 0 else "down"
-            parts.append(f"{data['symbol']} at ${price} {direction} {abs(change):.2f}%")
-
-        spoken_text = " vs ".join(parts) if parts else "No comparison data available."
-        self.last_broadcast_agent_text = spoken_text
-        
-        self.orchestrator.mark_response_spoken()
-        self.turn_number += 1
-
-        repo.record_turn(
-            session_id=self.session_id,
-            turn_number=self.turn_number,
-            turn_version=version,
-            sender="agent",
-            text=spoken_text,
-            latency_ms=latency_ms,
-        )
-
-        await self.broadcast("tool_complete", {
-            "name": f"compare_stocks({','.join(symbol_list)})",
-            "version": version,
-            "data": result,
-            "latency_ms": latency_ms
-        })
-        await self.broadcast("agent_response", {
-            "text": spoken_text,
-            "version": version
-        })
-        return spoken_text
 
     # =============================================
-    # SEARCH TOOLS (Weather, Time, News, General)
+    # SEARCH TOOLS
     # =============================================
 
     @function_tool()
     async def get_weather_info(self, context: RunContext, city: str) -> str:
-        """Get current weather for a city."""
+        """
+        Get current weather for a city.
+
+        Args:
+            city: City name, e.g. "London", "Cape Town", "Delhi".
+        """
         clean_city = city.strip()
-        version = self.orchestrator.state.turn_version
-        t0 = time.time()
-        
-        self.orchestrator.mark_tool_started()
 
-        tool_db_id = repo.record_tool_execution(
-            session_id=self.session_id,
-            turn_version=version,
+        def fmt(data: dict) -> str:
+            return (
+                f"Weather in {data['location']}: {data['temperature_c']}°C, "
+                f"{data['condition']}, humidity {data['humidity']}%, "
+                f"wind {data['wind_speed_kmh']} km/h."
+            )
+
+        return await self._run_tool(
             tool_name="get_weather",
-            parameters={"city": clean_city},
-            status="running",
+            params={"city": clean_city},
+            coro=get_weather(clean_city),
+            spoken_formatter=fmt,
+            broadcast_extra={"city": clean_city},
         )
-
-        await self.broadcast("tool_start", {"name": f"get_weather({clean_city})", "version": version})
-        data = await self.orchestrator.tool_mgr.run(
-            version, get_weather(clean_city)
-        )
-        latency_ms = round((time.time() - t0) * 1000, 1)
-        
-        self.orchestrator.mark_tool_resolved()
-
-        if data is None:
-            repo.update_tool_execution(tool_db_id, status="cancelled", latency_ms=latency_ms, error="Superseded")
-            await self.broadcast("tool_cancel", {"name": f"get_weather({clean_city})", "stale_version": version, "reason": "superseded"})
-            return "That request was superseded by a newer one — no result to report."
-
-        if "error" in data:
-            repo.update_tool_execution(tool_db_id, status="error", latency_ms=latency_ms, error=data["error"])
-            await self.broadcast("tool_complete", {"name": f"get_weather({clean_city})", "version": version, "error": data["error"], "latency_ms": latency_ms})
-            return f"Couldn't get weather: {data['error']}"
-
-        repo.update_tool_execution(tool_db_id, status="success", latency_ms=latency_ms, result=data)
-
-        res_text = (
-            f"Weather in {data['location']}: {data['temperature_c']}°C, {data['condition']}, "
-            f"humidity {data['humidity']}%, wind {data['wind_speed_kmh']} km/h."
-        )
-        self.last_broadcast_agent_text = res_text
-        
-        self.orchestrator.mark_response_spoken()
-        self.turn_number += 1
-
-        repo.record_turn(
-            session_id=self.session_id,
-            turn_number=self.turn_number,
-            turn_version=version,
-            sender="agent",
-            text=res_text,
-            latency_ms=latency_ms,
-        )
-
-        await self.broadcast("tool_complete", {"name": f"get_weather({clean_city})", "version": version, "data": data, "latency_ms": latency_ms})
-        await self.broadcast("agent_response", {"text": res_text, "version": version})
-        return res_text
 
     @function_tool()
-    async def get_time_info(self, context: RunContext, timezone: str = "America/New_York") -> str:
-        """Get current time and date for a timezone or city."""
-        clean_tz = timezone.strip()
-        version = self.orchestrator.state.turn_version
-        t0 = time.time()
-        
-        self.orchestrator.mark_tool_started()
+    async def get_time_info(
+        self,
+        context: RunContext,
+        timezone: Optional[str] = "America/New_York",
+    ) -> str:
+        """
+        Get current time and date for a timezone or city.
 
-        tool_db_id = repo.record_tool_execution(
-            session_id=self.session_id,
-            turn_version=version,
+        Args:
+            timezone: IANA timezone or common city name, e.g. "Asia/Kolkata",
+                "Cape Town", "New Zealand".
+        """
+        clean_tz = (timezone or "America/New_York").strip()
+
+        def fmt(data: dict) -> str:
+            return f"{data['day_of_week']}, {data['datetime']} ({data['timezone']})"
+
+        return await self._run_tool(
             tool_name="get_time",
-            parameters={"timezone": clean_tz},
-            status="running",
+            params={"timezone": clean_tz},
+            coro=get_time(clean_tz),
+            spoken_formatter=fmt,
+            broadcast_extra={"timezone": clean_tz},
         )
-
-        await self.broadcast("tool_start", {"name": f"get_time({clean_tz})", "version": version})
-        data = await self.orchestrator.tool_mgr.run(
-            version, get_time(clean_tz)
-        )
-        latency_ms = round((time.time() - t0) * 1000, 1)
-        
-        self.orchestrator.mark_tool_resolved()
-
-        if data is None:
-            repo.update_tool_execution(tool_db_id, status="cancelled", latency_ms=latency_ms, error="Superseded")
-            await self.broadcast("tool_cancel", {"name": f"get_time({clean_tz})", "stale_version": version, "reason": "superseded"})
-            return "That request was superseded by a newer one — no result to report."
-
-        if "error" in data:
-            repo.update_tool_execution(tool_db_id, status="error", latency_ms=latency_ms, error=data["error"])
-            await self.broadcast("tool_complete", {"name": f"get_time({clean_tz})", "version": version, "error": data["error"], "latency_ms": latency_ms})
-            return f"Couldn't get time: {data['error']}"
-
-        repo.update_tool_execution(tool_db_id, status="success", latency_ms=latency_ms, result=data)
-
-        res_text = f"{data['day_of_week']}, {data['datetime']} ({data['timezone']})"
-        self.last_broadcast_agent_text = res_text
-        
-        self.orchestrator.mark_response_spoken()
-        self.turn_number += 1
-
-        repo.record_turn(
-            session_id=self.session_id,
-            turn_number=self.turn_number,
-            turn_version=version,
-            sender="agent",
-            text=res_text,
-            latency_ms=latency_ms,
-        )
-
-        await self.broadcast("tool_complete", {"name": f"get_time({clean_tz})", "version": version, "data": data, "latency_ms": latency_ms})
-        await self.broadcast("agent_response", {"text": res_text, "version": version})
-        return res_text
 
     @function_tool()
     async def get_news(self, context: RunContext, symbol: str) -> str:
-        """Get latest news for a stock ticker."""
+        """
+        Get latest news headlines for a stock ticker.
+
+        Args:
+            symbol: Ticker symbol, e.g. AAPL, TSLA, NVDA.
+        """
         clean_sym = symbol.strip().upper()
-        version = self.orchestrator.state.turn_version
-        t0 = time.time()
-        
-        self.orchestrator.mark_tool_started()
 
-        tool_db_id = repo.record_tool_execution(
-            session_id=self.session_id,
-            turn_version=version,
-            tool_name="get_news",
-            parameters={"symbol": clean_sym},
-            status="running",
-        )
-
-        await self.broadcast("tool_start", {"name": f"get_news({clean_sym})", "version": version})
-        data = await self.orchestrator.tool_mgr.run(
-            version, get_stock_news(clean_sym, limit=2)
-        )
-        latency_ms = round((time.time() - t0) * 1000, 1)
-        
-        self.orchestrator.mark_tool_resolved()
-
-        if data is None:
-            repo.update_tool_execution(tool_db_id, status="cancelled", latency_ms=latency_ms, error="Superseded")
-            await self.broadcast("tool_cancel", {"name": f"get_news({clean_sym})", "stale_version": version, "reason": "superseded"})
-            return "That request was superseded by a newer one — no result to report."
-
-        if "error" in data:
-            repo.update_tool_execution(tool_db_id, status="error", latency_ms=latency_ms, error=data["error"])
-            await self.broadcast("tool_complete", {"name": f"get_news({clean_sym})", "version": version, "error": data["error"], "latency_ms": latency_ms})
-            return f"Couldn't get news: {data['error']}"
-
-        repo.update_tool_execution(tool_db_id, status="success", latency_ms=latency_ms, result=data)
-
-        if not data.get("news"):
-            res_text = f"No recent news found for {clean_sym}."
-        else:
+        def fmt(data: dict) -> str:
+            if not data.get("news"):
+                return f"No recent news found for {clean_sym}."
             headlines = [f"• {item['title']} ({item['source']})" for item in data["news"][:2]]
-            res_text = f"Latest news for {clean_sym}: " + " ".join(headlines)
+            return f"Latest news for {clean_sym}: " + " ".join(headlines)
 
-        self.last_broadcast_agent_text = res_text
-        
-        self.orchestrator.mark_response_spoken()
-        self.turn_number += 1
-
-        repo.record_turn(
-            session_id=self.session_id,
-            turn_number=self.turn_number,
-            turn_version=version,
-            sender="agent",
-            text=res_text,
-            latency_ms=latency_ms,
+        return await self._run_tool(
+            tool_name="get_news",
+            params={"symbol": clean_sym},
+            coro=get_stock_news(clean_sym, limit=2),
+            spoken_formatter=fmt,
+            broadcast_extra={"symbol": clean_sym},
         )
-
-        await self.broadcast("tool_complete", {"name": f"get_news({clean_sym})", "version": version, "data": data, "latency_ms": latency_ms})
-        await self.broadcast("agent_response", {"text": res_text, "version": version})
-        return res_text
 
     @function_tool()
     async def general_search(self, context: RunContext, query: str) -> str:
-        """Perform a general web search."""
+        """
+        Perform a general web search for facts not covered by other tools.
+
+        Args:
+            query: The search query, e.g. "population of Iceland".
+        """
         clean_query = query.strip()
-        version = self.orchestrator.state.turn_version
-        t0 = time.time()
-        
-        self.orchestrator.mark_tool_started()
 
-        tool_db_id = repo.record_tool_execution(
-            session_id=self.session_id,
-            turn_version=version,
-            tool_name="general_search",
-            parameters={"query": clean_query},
-            status="running",
-        )
-
-        await self.broadcast("tool_start", {"name": f"search({clean_query})", "version": version})
-        data = await self.orchestrator.tool_mgr.run(
-            version, search(clean_query, limit=3)
-        )
-        latency_ms = round((time.time() - t0) * 1000, 1)
-        
-        self.orchestrator.mark_tool_resolved()
-
-        if data is None:
-            repo.update_tool_execution(tool_db_id, status="cancelled", latency_ms=latency_ms, error="Superseded")
-            await self.broadcast("tool_cancel", {"name": f"search({clean_query})", "stale_version": version, "reason": "superseded"})
-            return "That request was superseded by a newer one — no result to report."
-
-        if "error" in data:
-            repo.update_tool_execution(tool_db_id, status="error", latency_ms=latency_ms, error=data["error"])
-            await self.broadcast("tool_complete", {"name": f"search({clean_query})", "version": version, "error": data["error"], "latency_ms": latency_ms})
-            return f"Couldn't search: {data['error']}"
-
-        repo.update_tool_execution(tool_db_id, status="success", latency_ms=latency_ms, result=data)
-
-        if not data.get("results"):
-            res_text = f"No results found for '{clean_query}'."
-        else:
+        def fmt(data: dict) -> str:
+            if not data.get("results"):
+                return f"No results found for '{clean_query}'."
             results = [f"• {item['title']}" for item in data["results"][:3]]
-            res_text = f"Here's what I found: " + " ".join(results)
+            return "Here's what I found: " + " ".join(results)
 
-        self.last_broadcast_agent_text = res_text
-        
-        self.orchestrator.mark_response_spoken()
-        self.turn_number += 1
-
-        repo.record_turn(
-            session_id=self.session_id,
-            turn_number=self.turn_number,
-            turn_version=version,
-            sender="agent",
-            text=res_text,
-            latency_ms=latency_ms,
+        return await self._run_tool(
+            tool_name="general_search",
+            params={"query": clean_query},
+            coro=search(clean_query, limit=3),
+            spoken_formatter=fmt,
+            broadcast_extra={"query": clean_query},
         )
-
-        await self.broadcast("tool_complete", {"name": f"search({clean_query})", "version": version, "data": data, "latency_ms": latency_ms})
-        await self.broadcast("agent_response", {"text": res_text, "version": version})
-        return res_text
 
 
 @server.rtc_session()
@@ -644,7 +459,6 @@ async def entrypoint(ctx: JobContext) -> None:
 
     session_id = room_name[5:] if room_name.startswith("room_") else room_name
 
-    # Ensure session exists in SQLite
     if not repo.get_session(session_id):
         repo.create_session(session_id=session_id, room_name=room_name)
 
@@ -655,8 +469,8 @@ async def entrypoint(ctx: JobContext) -> None:
     llm = _build_llm()
     if llm is None:
         raise RuntimeError(
-            "No LLM provider configured. Set GROQ_API_KEY (free, "
-            "recommended) or OPENAI_API_KEY in your .env before running."
+            "No LLM provider configured. Set OPENAI_API_KEY (primary) and/or "
+            "GROQ_API_KEY (fallback) in your .env before running."
         )
 
     tts_plugin = build_rime_tts(
@@ -665,12 +479,22 @@ async def entrypoint(ctx: JobContext) -> None:
         speed=session_settings.get("voice_speed"),
     )
 
+    # NOTE: do NOT pass max_chat_history — it is not a valid AgentSession
+    # kwarg in livekit-agents 1.7/1.8, and passing it raises TypeError
+    # before the session is constructed. Chat history is bounded inside
+    # ContinuityAgent.on_user_turn_completed via ChatContext.truncate().
+    #
+    # preemptive_generation=False halves LLM request volume. With preemptive
+    # on, every user utterance triggers two LLM calls: one speculative call
+    # as the transcript settles, and one real call after the turn commits.
+    # That doubling is what pushed the earlier Groq-only runs into 429s.
     session = AgentSession(
         stt=deepgram.STT(),
         llm=llm,
         tts=tts_plugin,
         vad=ctx.proc.userdata["vad"],
         allow_interruptions=True,
+        preemptive_generation=False,
     )
 
     agent = ContinuityAgent(orchestrator, session_id=session_id, room=ctx.room)
@@ -686,7 +510,7 @@ async def entrypoint(ctx: JobContext) -> None:
             await agent.broadcast("transcript", {
                 "sender": "You",
                 "text": transcript.transcript,
-                "is_final": transcript.is_final
+                "is_final": transcript.is_final,
             })
 
         asyncio.create_task(_handle_transcript())
@@ -714,7 +538,7 @@ async def entrypoint(ctx: JobContext) -> None:
                     logger.info(f"Broadcasting assistant response: {text}")
                     asyncio.create_task(agent.broadcast("agent_response", {
                         "text": text,
-                        "version": orchestrator.state.turn_version
+                        "version": orchestrator.state.turn_version,
                     }))
         except Exception as e:
             logger.warning(f"Error handling conversation item: {e}")
@@ -735,10 +559,7 @@ async def entrypoint(ctx: JobContext) -> None:
             logger.warning(f"Error handling data channel packet: {e}")
 
     async def handle_text_chat(session: AgentSession, text: str, agent: ContinuityAgent):
-        """Handle text chat input from the frontend."""
         try:
-            # If the user sent "Hello" and we already greeted, don't respond with another greeting
-            # Let the orchestrator handle it naturally
             await session.generate_reply(user_input=text)
         except Exception as e:
             logger.error(f"Error processing text chat: {e}")

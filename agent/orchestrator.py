@@ -15,6 +15,17 @@ from agent.utils.metrics import LatencyTracker
 logger = get_logger(__name__)
 
 
+# Map a detected search type to the exact tool name the LLM should call.
+# This keeps intent["tool"] in sync with intent["search_type"] so the LLM
+# never sees a stale "stock_quote" when the user actually asked for weather.
+SEARCH_TYPE_TO_TOOL = {
+    "weather": "get_weather_info",
+    "time": "get_time_info",
+    "news": "get_news",
+    "general": "general_search",
+}
+
+
 class Orchestrator:
     """
     Owns one conversation's lifecycle: state + tool-call fencing.
@@ -42,26 +53,37 @@ class Orchestrator:
 
         intent, is_new_request = route_intent(text, self.state.current_intent)
 
-        # Check if this is a search query (weather, time, news, etc.)
+        # Override the routed tool when the utterance is clearly a search query.
+        # Without this, the LLM sees tool="stock_quote" alongside search_type="weather"
+        # and can route incorrectly (or worse, hallucinate a ticker).
         if self._is_search_query(text):
+            search_type = self._detect_search_type(text)
             intent["search"] = True
-            intent["search_type"] = self._detect_search_type(text)
+            intent["search_type"] = search_type
+            intent["tool"] = SEARCH_TYPE_TO_TOOL.get(search_type, "general_search")
+            # Search queries don't have stock symbols — clear any stale ones
+            intent["symbols"] = []
 
         if is_new_request:
             # Cancel active tools BEFORE bumping the version
             cancelled_count = self.tool_mgr.cancel_active()
             if cancelled_count > 0:
                 logger.debug(f"Cancelled {cancelled_count} active tool tasks")
-            
+
             version = self.state.bump_version(intent)
             logger.info(f"New intent, version={version}: {intent}")
-            
+
             # Mark that we have a new turn - but don't log yet (wait for tool completion)
             self._pending_metrics_flush = True
         else:
             version = self.state.turn_version
+            # Merge in search flags so continuation searches still route correctly
+            merged = dict(self.state.current_intent)
+            merged.update({k: v for k, v in intent.items() if v not in ([], None, "")})
+            self.state.current_intent = merged
+            intent = merged
             logger.info(f"Continuation, version unchanged={version}")
-            
+
             # For continuations with no tool calls, log immediately
             if self.metrics.has_marks() and not self._pending_metrics_flush:
                 self.metrics.log_turn()

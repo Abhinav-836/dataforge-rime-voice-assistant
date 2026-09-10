@@ -6,11 +6,12 @@ yfinance: Fallback when Finnhub key is missing or fails, OR when volume is reque
           (Finnhub free /quote endpoint does not return trading volume).
 
 Multi-ticker support: parallel fetch for comparison queries.
+Includes a short-lived TTL cache to prevent duplicate calls within a turn.
 """
 
 import asyncio
 import time
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import requests
 import yfinance as yf
 
@@ -21,6 +22,27 @@ logger = get_logger(__name__)
 
 FINNHUB_QUOTE_URL = "https://finnhub.io/api/v1/quote"
 DEFAULT_TIMEOUT_SECONDS = 4.0
+
+# ---------------------------------------------------------------------------
+# TTL cache for quote lookups. Prevents the duplicate stock_quote calls we saw
+# in the logs (same symbol fetched twice within 2 seconds).
+# ---------------------------------------------------------------------------
+_QUOTE_CACHE: Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]] = {}
+_QUOTE_TTL_SECONDS = 10.0
+
+
+def _cache_get(symbol: str, field: str) -> Optional[Dict[str, Any]]:
+    key = (symbol.upper(), field.lower())
+    hit = _QUOTE_CACHE.get(key)
+    if hit and (time.time() - hit[0]) < _QUOTE_TTL_SECONDS:
+        logger.debug(f"Cache hit for {key}")
+        return dict(hit[1])
+    return None
+
+
+def _cache_put(symbol: str, field: str, value: Dict[str, Any]) -> None:
+    key = (symbol.upper(), field.lower())
+    _QUOTE_CACHE[key] = (time.time(), dict(value))
 
 
 # =============================================================================
@@ -106,7 +128,6 @@ def _get_yfinance_quote(symbol: str) -> Optional[Dict[str, Any]]:
         day_low = float(hist["Low"].iloc[-1])
         volume = int(hist["Volume"].iloc[-1]) if "Volume" in hist and not hist["Volume"].empty else 0
 
-        # Calculate previous close for accurate price delta
         if len(hist) > 1:
             prev_close = float(hist["Close"].iloc[-2])
         else:
@@ -132,42 +153,46 @@ def _get_yfinance_quote(symbol: str) -> Optional[Dict[str, Any]]:
 
 
 # =============================================================================
-# UNIFIED FETCH WITH FIELD-AWARE FALLBACK
+# UNIFIED FETCH WITH FIELD-AWARE FALLBACK + CACHE
 # =============================================================================
 
 def _fetch_quote_sync(symbol: str, field: str = "price") -> Optional[Dict[str, Any]]:
     """
     Fetch market data for a symbol with field-aware fallback.
 
-    CRITICAL FIX:
-    If field == "volume", Finnhub free /quote does NOT return volume.
-    We must use yfinance directly so volume queries succeed with actual trading numbers.
+    Volume requests must use yfinance directly because Finnhub's free
+    /quote endpoint does not return trading volume.
     """
     symbol_clean = symbol.strip().upper()
     field_clean = field.strip().lower() if field else "price"
 
-    # For volume requests: Finnhub free tier does NOT return volume
-    # Skip Finnhub entirely and use yfinance directly
+    # Cache check first — avoids duplicate calls within a short window
+    cached = _cache_get(symbol_clean, field_clean)
+    if cached is not None:
+        return cached
+
     if field_clean == "volume":
         yf_result = _get_yfinance_quote(symbol_clean)
         if yf_result and yf_result.get("volume") is not None and yf_result["volume"] > 0:
             yf_result["field"] = "volume"
+            _cache_put(symbol_clean, field_clean, yf_result)
             return yf_result
-        # If yfinance fails, return None (don't return Finnhub with None volume)
         logger.warning(f"Volume lookup failed for {symbol_clean} - yfinance returned no data")
         return None
 
-    # For price or general requests: Try Finnhub primary first
+    # Price/general: Finnhub first
     fh_result = _get_finnhub_quote(symbol_clean)
     if fh_result:
         fh_result["field"] = field_clean
+        _cache_put(symbol_clean, field_clean, fh_result)
         return fh_result
 
-    # Fallback to yfinance if Finnhub failed or key was missing
+    # Fallback to yfinance
     logger.info(f"Falling back to yfinance for {symbol_clean}")
     yf_result = _get_yfinance_quote(symbol_clean)
     if yf_result:
         yf_result["field"] = field_clean
+        _cache_put(symbol_clean, field_clean, yf_result)
         return yf_result
 
     return None
@@ -188,7 +213,6 @@ async def get_stock_quote(intent: Dict[str, Any]) -> Dict[str, Any]:
     if not symbols:
         return {"error": "No ticker symbol provided"}
 
-    # Disclosed artificial delay (only if explicitly configured > 0.0 in .env for testing)
     delay = config.artificial_delay_seconds
     if delay > 0:
         logger.info(f"Applying artificial delay {delay}s for stress testing")
@@ -212,7 +236,6 @@ async def get_stock_quote(intent: Dict[str, Any]) -> Dict[str, Any]:
         data = valid_results[0]
         data["field"] = field
 
-        # Generate natural spoken summary text
         if field == "volume":
             vol = data.get("volume")
             if vol:
@@ -229,7 +252,6 @@ async def get_stock_quote(intent: Dict[str, Any]) -> Dict[str, Any]:
             )
         return data
 
-    # Multi-symbol comparison
     parts = []
     for data in valid_results:
         pct = data.get("percent_change", 0.0)

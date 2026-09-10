@@ -3,11 +3,11 @@ Search tools for weather, time, news, and general search.
 Non-blocking execution using asyncio loop executors with bounded timeouts and input sanitization.
 """
 
-import sys
 import re
+import time
 import urllib.parse
 import asyncio
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, Tuple
 from datetime import datetime
 import zoneinfo
 import requests
@@ -17,7 +17,6 @@ from agent.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Bounded HTTP timeout for all external search calls
 SEARCH_TIMEOUT_SECONDS = 4.0
 
 HEADERS = {
@@ -42,7 +41,24 @@ COMMON_CITY_TIMEZONES = {
     "sydney": "Australia/Sydney",
     "utc": "UTC",
     "gmt": "GMT",
+    # Additional mappings used in the logs
+    "delhi": "Asia/Kolkata",
+    "new delhi": "Asia/Kolkata",
+    "mumbai": "Asia/Kolkata",
+    "india": "Asia/Kolkata",
+    "ohio": "America/New_York",
+    "columbus": "America/New_York",
+    "oregon": "America/Los_Angeles",
+    "portland": "America/Los_Angeles",
+    "cape town": "Africa/Johannesburg",
+    "johannesburg": "Africa/Johannesburg",
+    "south africa": "Africa/Johannesburg",
 }
+
+# Short-lived TTL cache for time lookups. Time doesn't change meaningfully
+# within 10s, and the logs showed the same timezone being fetched twice per turn.
+_TIME_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_TIME_TTL_SECONDS = 10.0
 
 
 async def _run_in_thread(func, *args, **kwargs):
@@ -61,7 +77,7 @@ def _get_weather_sync(city: str) -> Dict[str, Any]:
 
     encoded_city = urllib.parse.quote_plus(clean_city)
     url = f"https://wttr.in/{encoded_city}?format=j1"
-    
+
     resp = requests.get(url, headers=HEADERS, timeout=SEARCH_TIMEOUT_SECONDS)
     resp.raise_for_status()
     data = resp.json()
@@ -105,21 +121,23 @@ async def get_weather(city: str) -> Dict[str, Any]:
 def _get_time_sync(timezone_or_city: str = "America/New_York") -> Dict[str, Any]:
     query = timezone_or_city.strip()
     query_lower = query.lower()
-    
-    # Resolve known cities to standard IANA timezone
+
+    # Cache check
+    cached = _TIME_CACHE.get(query_lower)
+    if cached and (time.time() - cached[0]) < _TIME_TTL_SECONDS:
+        return dict(cached[1])
+
     iana_tz = COMMON_CITY_TIMEZONES.get(query_lower, query)
-    
+
     dt = None
     tz_obj = None
-    
-    # Primary: Fast, local, zero-network zoneinfo lookup
+
     try:
         tz_obj = zoneinfo.ZoneInfo(iana_tz)
         dt = datetime.now(tz_obj)
     except Exception:
         pass
 
-    # If IANA timezone was not found directly, try finding matching timezone key
     if dt is None:
         for known_city, tz_name in COMMON_CITY_TIMEZONES.items():
             if known_city in query_lower:
@@ -131,7 +149,6 @@ def _get_time_sync(timezone_or_city: str = "America/New_York") -> Dict[str, Any]
                 except Exception:
                     pass
 
-    # Fallback: worldtimeapi.org with short timeout
     if dt is None:
         try:
             url = f"http://worldtimeapi.org/api/timezone/{urllib.parse.quote(query)}"
@@ -143,14 +160,13 @@ def _get_time_sync(timezone_or_city: str = "America/New_York") -> Dict[str, Any]
         except Exception:
             pass
 
-    # Final fallback: Local system time
     if dt is None:
         dt = datetime.now()
         iana_tz = "Local"
 
     utc_offset = dt.strftime("%z") or "UTC"
 
-    return {
+    result = {
         "timezone": iana_tz,
         "datetime": dt.strftime("%Y-%m-%d %H:%M:%S"),
         "day_of_week": dt.strftime("%A"),
@@ -159,6 +175,9 @@ def _get_time_sync(timezone_or_city: str = "America/New_York") -> Dict[str, Any]
         "utc_offset": utc_offset,
         "source": "Python zoneinfo",
     }
+
+    _TIME_CACHE[query_lower] = (time.time(), result)
+    return result
 
 
 async def get_time(timezone: str = "America/New_York") -> Dict[str, Any]:
@@ -187,7 +206,6 @@ def _get_stock_news_sync(symbol: str, limit: int = 3) -> Dict[str, Any]:
 
     articles = []
 
-    # Primary: yfinance news lookup
     try:
         import yfinance as yf
         ticker = yf.Ticker(company_name)
@@ -210,7 +228,6 @@ def _get_stock_news_sync(symbol: str, limit: int = 3) -> Dict[str, Any]:
     except Exception as e:
         logger.debug(f"yfinance news lookup fallback: {e}")
 
-    # Fallback: Google News search with bounded timeout
     if not articles:
         try:
             query = f"{company_name} stock news"
@@ -281,7 +298,6 @@ def _search_sync(query: str, limit: int = 5) -> Dict[str, Any]:
 
     results = []
 
-    # Primary: DuckDuckGo Lite with bounded timeout
     try:
         resp = requests.post(
             "https://lite.duckduckgo.com/lite/",
@@ -299,7 +315,6 @@ def _search_sync(query: str, limit: int = 5) -> Dict[str, Any]:
     except Exception as e:
         logger.debug(f"DDG Lite search failed: {e}")
 
-    # Fallback: Wikipedia Summary API
     if not results:
         try:
             wiki_term = urllib.parse.quote(clean_query.replace(" ", "_"))
